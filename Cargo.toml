@@ -1,0 +1,32 @@
+[package]
+name = "reciso"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+description = "Create bootable UEFI ISOs from kernel + initramfs + rootfs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LevitateOS/reciso"
+homepage = "https://github.com/LevitateOS/reciso"
+documentation = "https://github.com/LevitateOS/reciso#readme"
+readme = "README.md"
+keywords = ["iso", "linux", "boot", "uefi", "xorriso"]
+categories = ["command-line-utilities", "filesystem"]
+authors = ["LevitateOS Contributors"]
+exclude = [
+    ".github/*",
+    "CLAUDE.md",
+]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+distro-builder = { path = "../../distro-builder" }
+recuki = { path = "../recuki" }
+
+[dev-dependencies]
+leviso-cheat-test = { path = "../../testing/cheat-test" }
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
