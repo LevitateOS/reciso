@@ -79,7 +79,7 @@ create_iso(&config)?;
 ## What It Does NOT Do
 
 - Create rootfs images (use `mkfs.erofs`)
-- Build initramfs (use `dracut`)
+- Build initramfs (use `recinit`)
 - Partition disks
 - Support legacy BIOS boot
 
