@@ -253,8 +253,7 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
     println!("Copying boot files...");
 
     // Copy kernel
-    fs::copy(&config.kernel, iso_root.join("boot/vmlinuz"))
-        .context("Failed to copy kernel")?;
+    fs::copy(&config.kernel, iso_root.join("boot/vmlinuz")).context("Failed to copy kernel")?;
 
     // Copy initramfs
     fs::copy(&config.initrd, iso_root.join("boot/initramfs.img"))
@@ -371,11 +370,7 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
 }
 
 /// Create EFI boot image with systemd-boot and UKIs.
-fn build_efi_boot_image(
-    iso_root: &Path,
-    output_dir: &Path,
-    uki_files: &[PathBuf],
-) -> Result<()> {
+fn build_efi_boot_image(iso_root: &Path, output_dir: &Path, uki_files: &[PathBuf]) -> Result<()> {
     println!("Creating EFI boot image...");
 
     let efiboot_img = output_dir.join("efiboot.img");
@@ -432,10 +427,16 @@ mod tests {
 
     #[test]
     fn test_iso_config_builder() {
-        let config = IsoConfig::new("vmlinuz", "initramfs.img", "rootfs.erofs", "TESTISO", "test.iso")
-            .with_os_release("TestOS", "testos", "1.0")
-            .with_uki("Normal", "", "testos.efi")
-            .with_uki("Emergency", "emergency", "testos-emergency.efi");
+        let config = IsoConfig::new(
+            "vmlinuz",
+            "initramfs.img",
+            "rootfs.erofs",
+            "TESTISO",
+            "test.iso",
+        )
+        .with_os_release("TestOS", "testos", "1.0")
+        .with_uki("Normal", "", "testos.efi")
+        .with_uki("Emergency", "emergency", "testos-emergency.efi");
 
         assert_eq!(config.kernel, PathBuf::from("vmlinuz"));
         assert_eq!(config.label, "TESTISO");
