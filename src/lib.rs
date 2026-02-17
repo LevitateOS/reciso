@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use distro_builder::{
-    copy_dir_recursive, create_efi_dirs_in_fat, create_fat16_image, generate_iso_checksum,
-    mcopy_to_fat, run_xorriso, setup_iso_structure,
+    create_efi_dirs_in_fat, create_fat16_image, generate_iso_checksum, mcopy_to_fat, run_xorriso,
+    setup_iso_structure,
+};
+use distro_spec::shared::{
+    INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH,
 };
 
 // Re-export recuki types for convenience
@@ -36,7 +39,7 @@ pub struct IsoConfig {
     pub kernel: PathBuf,
     /// Path to initramfs image.
     pub initrd: PathBuf,
-    /// Path to rootfs image (EROFS or squashfs).
+    /// Path to rootfs image (EROFS).
     pub rootfs: PathBuf,
     /// ISO volume label (used for boot device detection).
     pub label: String,
@@ -44,8 +47,8 @@ pub struct IsoConfig {
     pub output: PathBuf,
     /// UKI sources (prebuilt files or build specs).
     pub ukis: Vec<UkiSource>,
-    /// Optional live overlay directory.
-    pub overlay: Option<PathBuf>,
+    /// Optional live overlay payload image (EROFS).
+    pub overlay_image: Option<PathBuf>,
     /// OS release information for UKI branding.
     pub os_release: Option<OsRelease>,
     /// Additional files to copy to ISO root.
@@ -86,7 +89,7 @@ impl IsoConfig {
             label: label.into(),
             output: output.into(),
             ukis: Vec::new(),
-            overlay: None,
+            overlay_image: None,
             os_release: None,
             extra_files: Vec::new(),
             generate_checksum: true,
@@ -114,10 +117,15 @@ impl IsoConfig {
         self
     }
 
-    /// Set live overlay directory.
-    pub fn with_overlay(mut self, path: impl Into<PathBuf>) -> Self {
-        self.overlay = Some(path.into());
+    /// Set live overlay payload image (EROFS).
+    pub fn with_overlay_image(mut self, path: impl Into<PathBuf>) -> Self {
+        self.overlay_image = Some(path.into());
         self
+    }
+
+    /// Legacy compatibility alias for `with_overlay_image`.
+    pub fn with_overlay(self, path: impl Into<PathBuf>) -> Self {
+        self.with_overlay_image(path)
     }
 
     /// Set OS release branding.
@@ -222,9 +230,15 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
     if !config.rootfs.exists() {
         bail!("Rootfs not found: {}", config.rootfs.display());
     }
-    if let Some(ref overlay) = config.overlay {
-        if !overlay.exists() {
-            bail!("Overlay directory not found: {}", overlay.display());
+    if let Some(ref overlay_image) = config.overlay_image {
+        if !overlay_image.exists() {
+            bail!("Overlay image not found: {}", overlay_image.display());
+        }
+        if !overlay_image.is_file() {
+            bail!(
+                "Overlay image path is not a file: {}",
+                overlay_image.display()
+            );
         }
     }
     for uki in &config.ukis {
@@ -253,26 +267,21 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
     println!("Copying boot files...");
 
     // Copy kernel
-    fs::copy(&config.kernel, iso_root.join("boot/vmlinuz")).context("Failed to copy kernel")?;
+    fs::copy(&config.kernel, iso_root.join(KERNEL_ISO_PATH)).context("Failed to copy kernel")?;
 
     // Copy initramfs
-    fs::copy(&config.initrd, iso_root.join("boot/initramfs.img"))
+    fs::copy(&config.initrd, iso_root.join(INITRAMFS_LIVE_ISO_PATH))
         .context("Failed to copy initramfs")?;
 
     // Copy rootfs
     println!("Copying rootfs...");
-    let rootfs_name = config
-        .rootfs
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "filesystem.img".to_string());
-    fs::copy(&config.rootfs, iso_root.join("live").join(&rootfs_name))
-        .context("Failed to copy rootfs")?;
+    fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH)).context("Failed to copy rootfs")?;
 
-    // Copy overlay if provided
-    if let Some(ref overlay) = config.overlay {
-        println!("Copying overlay...");
-        copy_dir_recursive(overlay, &iso_root.join("live/overlay"))?;
+    // Copy live overlay payload image if provided
+    if let Some(ref overlay_image) = config.overlay_image {
+        println!("Copying live overlay image...");
+        fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
+            .context("Failed to copy live overlay image")?;
     }
 
     Ok(())

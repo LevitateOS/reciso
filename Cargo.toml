@@ -21,6 +21,7 @@ exclude = [
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 distro-builder = { path = "../../distro-builder" }
+distro-spec = { path = "../../distro-spec" }
 recuki = { path = "../recuki" }
 
 [dev-dependencies]

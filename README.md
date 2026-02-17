@@ -25,9 +25,9 @@ reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
        --os-name MyOS --os-id myos --os-version 1.0 \
        -o output.iso
 
-# With live overlay
+# With live overlay image (EROFS)
 reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-       --overlay live-overlay/ -o output.iso
+       --overlay-image live-overlay.erofs -o output.iso
 ```
 
 ## Options
@@ -52,8 +52,8 @@ Branding:
 --os-version <VERSION>   OS version string
 
 Other:
---overlay <DIR>          Live overlay directory
---extra <SRC:DEST>       Add extra file to ISO
+--overlay-image <FILE>   Live overlay payload image (EROFS)
+--extra-file <SRC:DEST>  Add extra file to ISO
 --checksum               Generate SHA256 checksum
 ```
 

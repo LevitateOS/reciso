@@ -29,9 +29,9 @@ EXAMPLES:
            --os-name MyOS --os-id myos --os-version 1.0 \
            -o output.iso
 
-    # With live overlay
+    # With live overlay image (EROFS)
     reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-           --overlay live-overlay/ -o output.iso
+           --overlay-image live-overlay.erofs -o output.iso
 
 REQUIREMENTS:
     - systemd-boot (dnf install systemd-boot)
@@ -49,7 +49,7 @@ struct Args {
     #[arg(short = 'i', long = "initrd")]
     initrd: PathBuf,
 
-    /// Path to rootfs image (EROFS or squashfs)
+    /// Path to rootfs image (EROFS)
     #[arg(short = 'r', long = "rootfs")]
     rootfs: PathBuf,
 
@@ -70,9 +70,14 @@ struct Args {
     #[arg(long = "build-uki")]
     build_ukis: Vec<String>,
 
-    /// Live overlay directory to include
-    #[arg(long = "overlay")]
-    overlay: Option<PathBuf>,
+    /// Add an extra file to the ISO. Format: "src:dst"
+    /// Example: "/tmp/initramfs-installed.img:boot/initramfs-installed.img"
+    #[arg(long = "extra-file")]
+    extra_files: Vec<String>,
+
+    /// Live overlay payload image (EROFS) to include
+    #[arg(long = "overlay-image")]
+    overlay_image: Option<PathBuf>,
 
     /// OS name for UKI branding (e.g., "LevitateOS")
     #[arg(long = "os-name")]
@@ -130,9 +135,25 @@ fn main() -> Result<()> {
         });
     }
 
-    // Add overlay
-    if let Some(overlay) = args.overlay {
-        config.overlay = Some(overlay);
+    // Parse and add extra files
+    for spec in &args.extra_files {
+        let parts: Vec<&str> = spec.splitn(2, ':').collect();
+        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            bail!(
+                "Invalid --extra-file format: '{}'\n\
+                 Expected: 'src:dst'\n\
+                 Example: '/tmp/initramfs-installed.img:boot/initramfs-installed.img'",
+                spec
+            );
+        }
+        config
+            .extra_files
+            .push((PathBuf::from(parts[0]), parts[1].to_string()));
+    }
+
+    // Add live overlay payload image
+    if let Some(overlay_image) = args.overlay_image {
+        config.overlay_image = Some(overlay_image);
     }
 
     // Add OS branding
@@ -156,6 +177,12 @@ fn main() -> Result<()> {
         println!("  Initrd: {}", args.initrd.display());
         println!("  Rootfs: {}", args.rootfs.display());
         println!("  Label: {}", args.label);
+        if let Some(ref overlay_image) = config.overlay_image {
+            println!("  Overlay image: {}", overlay_image.display());
+        }
+        if !config.extra_files.is_empty() {
+            println!("  Extra files: {}", config.extra_files.len());
+        }
         if !config.ukis.is_empty() {
             println!("  UKIs: {}", config.ukis.len());
         }

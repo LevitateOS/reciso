@@ -44,9 +44,9 @@ reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
        --os-name MyOS --os-id myos --os-version 1.0 \
        -o output.iso
 
-# With live overlay
+# With live overlay image (EROFS)
 reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-       --overlay live-overlay/ -o output.iso
+       --overlay-image live-overlay.erofs -o output.iso
 ```
 
 ## Library Usage
