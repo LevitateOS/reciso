@@ -27,7 +27,3 @@ recuki = { path = "../recuki" }
 [dev-dependencies]
 leviso-cheat-test = { path = "../../testing/cheat-test" }
 tempfile = "3"
-
-[profile.release]
-strip = true
-lto = true

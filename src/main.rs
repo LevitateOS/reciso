@@ -3,10 +3,10 @@
 //! Creates ISOs with UKI (Unified Kernel Image) boot using systemd-boot.
 
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-use reciso::{create_iso, IsoConfig, UkiSource};
+use reciso::{create_iso, IsoConfig, LivePayloadLayout, UkiSource};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -95,6 +95,15 @@ struct Args {
     #[arg(long = "no-checksum")]
     no_checksum: bool,
 
+    /// Layout for live payloads (`iso-files` or `appended-partitions`)
+    #[arg(
+        long = "live-payload-layout",
+        default_value = "appended-partitions",
+        value_enum,
+        value_name = "LAYOUT"
+    )]
+    live_payload_layout: RecisoPayloadLayoutArg,
+
     /// Quiet mode - only print errors
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
@@ -171,6 +180,11 @@ fn main() -> Result<()> {
         config.generate_checksum = false;
     }
 
+    config.live_payload_layout = match args.live_payload_layout {
+        RecisoPayloadLayoutArg::AppendedPartitions => LivePayloadLayout::AppendedPartitions,
+        RecisoPayloadLayoutArg::IsoFiles => LivePayloadLayout::IsoFiles,
+    };
+
     if !args.quiet {
         println!("Creating ISO: {}", args.output.display());
         println!("  Kernel: {}", args.kernel.display());
@@ -199,4 +213,14 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RecisoPayloadLayoutArg {
+    /// Keep payloads as files under `live/` in ISO filesystem.
+    #[value(name = "iso-files")]
+    IsoFiles,
+    /// Append payloads as GPT partitions.
+    #[value(name = "appended-partitions")]
+    AppendedPartitions,
 }

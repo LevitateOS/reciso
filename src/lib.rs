@@ -19,10 +19,11 @@ use std::process::Command;
 
 use distro_builder::{
     create_efi_dirs_in_fat, create_fat16_image, generate_iso_checksum, mcopy_to_fat, run_xorriso,
-    setup_iso_structure,
+    setup_iso_structure, AppendedPartition,
 };
 use distro_spec::shared::{
-    INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH,
+    LoaderConfig, INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH,
+    ROOTFS_ISO_PATH, SELINUX_DISABLE,
 };
 
 // Re-export recuki types for convenience
@@ -55,6 +56,16 @@ pub struct IsoConfig {
     pub extra_files: Vec<(PathBuf, String)>,
     /// Generate SHA512 checksum.
     pub generate_checksum: bool,
+    /// How to place rootfs/overlay payloads on boot media.
+    pub live_payload_layout: LivePayloadLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivePayloadLayout {
+    /// Keep payloads as files under `live/` in ISO filesystem.
+    IsoFiles,
+    /// Append payload images as GPT partitions (direct block mounts in initramfs).
+    AppendedPartitions,
 }
 
 /// Source for a UKI - either prebuilt or to be built.
@@ -71,6 +82,13 @@ pub enum UkiSource {
         /// Output filename (e.g., "myos-live.efi").
         filename: String,
     },
+}
+
+#[derive(Debug, Clone)]
+struct UkiMenuEntry {
+    title: String,
+    filename: String,
+    path: PathBuf,
 }
 
 impl IsoConfig {
@@ -93,6 +111,7 @@ impl IsoConfig {
             os_release: None,
             extra_files: Vec::new(),
             generate_checksum: true,
+            live_payload_layout: LivePayloadLayout::AppendedPartitions,
         }
     }
 
@@ -143,6 +162,12 @@ impl IsoConfig {
     /// Disable checksum generation.
     pub fn without_checksum(mut self) -> Self {
         self.generate_checksum = false;
+        self
+    }
+
+    /// Force legacy payload placement (`live/*.erofs` files in ISO filesystem).
+    pub fn with_live_payload_iso_files(mut self) -> Self {
+        self.live_payload_layout = LivePayloadLayout::IsoFiles;
         self
     }
 }
@@ -200,7 +225,28 @@ pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
 
     // Stage 6: Create ISO
     println!("Creating ISO with xorriso...");
-    run_xorriso(&iso_root, &config.output, &config.label, "efiboot.img")?;
+    let mut appended = Vec::new();
+    if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
+        appended.push(AppendedPartition {
+            index: 2,
+            type_code: "0x83",
+            path: &config.rootfs,
+        });
+        if let Some(ref overlay_image) = config.overlay_image {
+            appended.push(AppendedPartition {
+                index: 3,
+                type_code: "0x83",
+                path: overlay_image,
+            });
+        }
+    }
+    run_xorriso(
+        &iso_root,
+        &config.output,
+        &config.label,
+        "efiboot.img",
+        &appended,
+    )?;
 
     // Stage 7: Generate checksum
     if config.generate_checksum {
@@ -273,15 +319,20 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
     fs::copy(&config.initrd, iso_root.join(INITRAMFS_LIVE_ISO_PATH))
         .context("Failed to copy initramfs")?;
 
-    // Copy rootfs
-    println!("Copying rootfs...");
-    fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH)).context("Failed to copy rootfs")?;
+    if config.live_payload_layout == LivePayloadLayout::IsoFiles {
+        println!("Copying rootfs...");
+        fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH))
+            .context("Failed to copy rootfs")?;
 
-    // Copy live overlay payload image if provided
-    if let Some(ref overlay_image) = config.overlay_image {
-        println!("Copying live overlay image...");
-        fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
-            .context("Failed to copy live overlay image")?;
+        if let Some(ref overlay_image) = config.overlay_image {
+            println!("Copying live overlay image...");
+            fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
+                .context("Failed to copy live overlay image")?;
+        }
+    } else {
+        println!(
+            "Live payload layout: appended partitions (rootfs/overlay not copied into ISO filesystem)"
+        );
     }
 
     Ok(())
@@ -297,12 +348,12 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
 
     // Build base cmdline
     let base_cmdline = format!(
-        "root=LABEL={} console=ttyS0,115200n8 console=tty0",
-        config.label
+        "root=LABEL={} console=ttyS0,115200n8 console=tty0 {}",
+        config.label, SELINUX_DISABLE
     );
 
     // Process UKIs
-    let mut uki_files = Vec::new();
+    let mut uki_entries: Vec<UkiMenuEntry> = Vec::new();
 
     for uki in &config.ukis {
         match uki {
@@ -310,10 +361,19 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
                 let filename = path.file_name().context("UKI has no filename")?;
                 let dst = uki_dir.join(filename);
                 fs::copy(path, &dst)?;
-                uki_files.push(dst);
+                let filename_str = filename.to_string_lossy().to_string();
+                let title = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| filename_str.clone());
+                uki_entries.push(UkiMenuEntry {
+                    title,
+                    filename: filename_str,
+                    path: dst,
+                });
             }
             UkiSource::Build {
-                name: _,
+                name,
                 extra_cmdline,
                 filename,
             } => {
@@ -333,13 +393,17 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
 
                 println!("  Building UKI: {}", filename);
                 recuki::build_uki(&uki_config)?;
-                uki_files.push(output);
+                uki_entries.push(UkiMenuEntry {
+                    title: name.clone(),
+                    filename: filename.clone(),
+                    path: output,
+                });
             }
         }
     }
 
     // If no UKIs specified, build a default one
-    if uki_files.is_empty() {
+    if uki_entries.is_empty() {
         let filename = format!("{}.efi", config.label.to_lowercase());
         let output = uki_dir.join(&filename);
         let mut uki_config =
@@ -351,7 +415,16 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
 
         println!("  Building UKI: {}", filename);
         recuki::build_uki(&uki_config)?;
-        uki_files.push(output);
+        let title = config
+            .os_release
+            .as_ref()
+            .map(|os| format!("{} {}", os.name, os.version))
+            .unwrap_or_else(|| config.label.clone());
+        uki_entries.push(UkiMenuEntry {
+            title,
+            filename,
+            path: output,
+        });
     }
 
     // Copy systemd-boot
@@ -361,25 +434,34 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
     let loader_dir = iso_root.join("loader");
     fs::create_dir_all(&loader_dir)?;
 
-    let default_uki = uki_files
+    let default_entry = uki_entries
         .first()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .map(|entry| entry_id(&entry.filename))
+        .unwrap_or_else(|| "default.conf".to_string());
+    let default_entry = default_entry.trim_end_matches(".conf").to_string();
+    let loader_config = LoaderConfig::with_defaults("default")
+        .with_default_entry(default_entry)
+        .with_timeout(5)
+        .with_console_mode("max");
 
     fs::write(
         loader_dir.join("loader.conf"),
-        format!("timeout 5\ndefault {}\n", default_uki),
+        loader_config.to_loader_conf(),
     )?;
+    write_loader_entries(&loader_dir, &uki_entries)?;
 
     // Create EFI boot image
-    build_efi_boot_image(iso_root, output_dir, &uki_files)?;
+    build_efi_boot_image(iso_root, output_dir, &uki_entries)?;
 
     Ok(())
 }
 
 /// Create EFI boot image with systemd-boot and UKIs.
-fn build_efi_boot_image(iso_root: &Path, output_dir: &Path, uki_files: &[PathBuf]) -> Result<()> {
+fn build_efi_boot_image(
+    iso_root: &Path,
+    output_dir: &Path,
+    uki_entries: &[UkiMenuEntry],
+) -> Result<()> {
     println!("Creating EFI boot image...");
 
     let efiboot_img = output_dir.join("efiboot.img");
@@ -405,8 +487,8 @@ fn build_efi_boot_image(iso_root: &Path, output_dir: &Path, uki_files: &[PathBuf
     )?;
 
     // Copy UKIs
-    for uki in uki_files {
-        mcopy_to_fat(&efiboot_img, uki, "::EFI/Linux/")?;
+    for uki in uki_entries {
+        mcopy_to_fat(&efiboot_img, &uki.path, "::EFI/Linux/")?;
     }
 
     // Create loader directory and copy loader.conf
@@ -420,6 +502,22 @@ fn build_efi_boot_image(iso_root: &Path, output_dir: &Path, uki_files: &[PathBuf
         &iso_root.join("loader/loader.conf"),
         "::loader/",
     )?;
+    if iso_root.join("loader/entries").is_dir() {
+        Command::new("mmd")
+            .args(["-i", &img_str, "::loader/entries"])
+            .output()
+            .context("mmd failed to create ::loader/entries")?;
+        let entries = fs::read_dir(iso_root.join("loader/entries"))
+            .context("reading loader entries for efiboot image")?;
+        for entry in entries {
+            let entry = entry.context("reading loader entries dir entry")?;
+            let entry_path = entry.path();
+            if entry_path.extension().and_then(|e| e.to_str()) != Some("conf") {
+                continue;
+            }
+            mcopy_to_fat(&efiboot_img, &entry_path, "::loader/entries/")?;
+        }
+    }
 
     // Copy efiboot.img into iso-root for xorriso
     fs::copy(&efiboot_img, iso_root.join("efiboot.img"))?;
@@ -427,6 +525,26 @@ fn build_efi_boot_image(iso_root: &Path, output_dir: &Path, uki_files: &[PathBuf
     // Cleanup temp file
     let _ = fs::remove_file(&efiboot_img);
 
+    Ok(())
+}
+
+fn entry_id(filename: &str) -> String {
+    format!("{}.conf", filename.trim_end_matches(".efi"))
+}
+
+fn write_loader_entries(loader_dir: &Path, entries: &[UkiMenuEntry]) -> Result<()> {
+    let entries_dir = loader_dir.join("entries");
+    fs::create_dir_all(&entries_dir)
+        .with_context(|| format!("creating loader entries dir '{}'", entries_dir.display()))?;
+    for entry in entries {
+        let entry_path = entries_dir.join(entry_id(&entry.filename));
+        let content = format!(
+            "title {}\nlinux /EFI/Linux/{}\n",
+            entry.title, entry.filename
+        );
+        fs::write(&entry_path, content)
+            .with_context(|| format!("writing loader entry '{}'", entry_path.display()))?;
+    }
     Ok(())
 }
 
