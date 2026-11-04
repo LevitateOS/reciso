@@ -23,7 +23,3 @@ clap = { version = "4.4", features = ["derive"] }
 distro-builder = { path = "../../distro-builder" }
 distro-spec = { path = "../../distro-spec" }
 recuki = { path = "../recuki" }
-
-[dev-dependencies]
-leviso-cheat-test = { path = "../../testing/cheat-test" }
-tempfile = "3"

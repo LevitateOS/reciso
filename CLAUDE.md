@@ -24,7 +24,7 @@ Standalone UEFI ISO builder. Creates bootable ISOs from kernel + initramfs + roo
 
 ```bash
 cargo build --release
-cargo test
+cargo check # Unit tests are prohibited; use focused integration/runtime checks.
 ```
 
 ## Usage
