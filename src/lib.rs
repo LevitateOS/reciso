@@ -228,13 +228,13 @@ pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
     let mut appended = Vec::new();
     if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
         appended.push(AppendedPartition {
-            index: 2,
+            index: distro_spec::shared::live_boot::ROOTFS_PAYLOAD_PARTITION,
             type_code: "0x83",
             path: &config.rootfs,
         });
         if let Some(ref overlay_image) = config.overlay_image {
             appended.push(AppendedPartition {
-                index: 3,
+                index: distro_spec::shared::live_boot::OVERLAY_PAYLOAD_PARTITION,
                 type_code: "0x83",
                 path: overlay_image,
             });
