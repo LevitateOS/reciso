@@ -18,18 +18,29 @@ use std::path::{Path, PathBuf};
 
 mod iso;
 
-use distro_spec::shared::{
-    LoaderConfig, EFIBOOT_FILENAME, EFI_BOOTLOADER, INITRAMFS_LIVE_ISO_PATH, ISO_EFI_DIR,
-    LOADER_CONF_FILENAME, LOADER_ENTRIES_DIR, UKI_EFI_DIR,
-    KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH,
-};
 use iso::{create_fat16_image, mcopy, mmd, run_xorriso, setup_iso_structure, AppendedPartition};
+use recinit::live::{
+    INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, OVERLAY_PAYLOAD_PARTITION,
+    ROOTFS_ISO_PATH, ROOTFS_PAYLOAD_PARTITION,
+};
 
 use recuki::OsRelease;
 
+/// The UEFI boot directory, on the ISO and in its EFI boot image.
+pub const ISO_EFI_DIR: &str = "EFI/BOOT";
+/// The UEFI loader file name in `ISO_EFI_DIR`.
+pub const EFI_BOOTLOADER: &str = "BOOTX64.EFI";
+/// The FAT EFI boot image at the ISO root.
+pub const EFIBOOT_FILENAME: &str = "efiboot.img";
+/// Where the UKIs go, on the ISO and in its EFI boot image.
+pub const UKI_EFI_DIR: &str = "EFI/Linux";
+/// systemd-boot's directory (`loader.conf` and `entries/`).
+pub const LOADER_ENTRIES_DIR: &str = "loader";
+pub const LOADER_CONF_FILENAME: &str = "loader.conf";
+
 /// Default systemd-boot UEFI binary (the build host's); a variant should
 /// pass its own rootfs's copy.
-pub use distro_spec::shared::SYSTEMD_BOOT_EFI as DEFAULT_SYSTEMD_BOOT_EFI;
+pub const DEFAULT_SYSTEMD_BOOT_EFI: &str = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi";
 
 #[derive(Debug, Clone)]
 pub struct IsoConfig {
@@ -164,13 +175,13 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     let mut appended = Vec::new();
     if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
         appended.push(AppendedPartition {
-            index: distro_spec::shared::live_boot::ROOTFS_PAYLOAD_PARTITION,
+            index: ROOTFS_PAYLOAD_PARTITION,
             type_code: "0x83",
             path: &config.rootfs,
         });
         if let Some(ref overlay_image) = config.overlay_image {
             appended.push(AppendedPartition {
-                index: distro_spec::shared::live_boot::OVERLAY_PAYLOAD_PARTITION,
+                index: OVERLAY_PAYLOAD_PARTITION,
                 type_code: "0x83",
                 path: overlay_image,
             });
@@ -349,13 +360,12 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     fs::create_dir_all(&loader_dir)?;
 
     let first = uki_entries.first().context("the ISO has no boot entries")?;
-    let loader_config = LoaderConfig::with_defaults(entry_stem(&first.filename))
-        .with_timeout(5)
-        .with_console_mode("max");
-
     fs::write(
         loader_dir.join(LOADER_CONF_FILENAME),
-        loader_config.to_loader_conf(),
+        format!(
+            "default {}.conf\ntimeout 5\nconsole-mode max\n",
+            entry_stem(&first.filename)
+        ),
     )?;
     write_loader_entries(&loader_dir, &uki_entries)?;
 

@@ -1,10 +1,15 @@
 //! The ISO's on-disk layout and the external tools that produce it.
 
 use anyhow::{bail, Context, Result};
-use distro_spec::shared::{
-    ISO_BOOT_DIR, ISO_CHECKSUM_SUFFIX, ISO_EFI_DIR, ISO_LIVE_DIR, SHA512_SEPARATOR,
-    XORRISO_FS_FLAGS, XORRISO_PARTITION_OFFSET,
-};
+use crate::ISO_EFI_DIR;
+use recinit::live::{ISO_BOOT_DIR, ISO_LIVE_DIR};
+
+/// The checksum written next to the ISO, in `sha512sum` format.
+const ISO_CHECKSUM_SUFFIX: &str = ".sha512";
+const SHA512_SEPARATOR: &str = "  ";
+/// MBR partition offset for the hybrid ISO.
+const XORRISO_PARTITION_OFFSET: u32 = 16;
+const XORRISO_FS_FLAGS: &[&str] = &["-full-iso9660-filenames", "-joliet", "-rational-rock"];
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
