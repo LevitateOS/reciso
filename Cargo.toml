@@ -11,5 +11,5 @@ description = "Create bootable UEFI ISOs from kernel + initramfs + rootfs"
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 tempfile = "3"
-distro-spec = { path = "../../distro-spec" }
+distro-spec = { path = "../../distro/spec" }
 recuki = { path = "../recuki" }
