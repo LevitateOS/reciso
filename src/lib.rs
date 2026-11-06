@@ -26,8 +26,7 @@ use distro_spec::shared::{
     ROOTFS_ISO_PATH, SELINUX_DISABLE,
 };
 
-// Re-export recuki types for convenience
-pub use recuki::{OsRelease, UkiConfig};
+use recuki::OsRelease;
 
 /// Default EFI boot image size in MB.
 /// UKIs require ~50MB each. With 3 UKIs + systemd-boot, need ~200MB.
@@ -60,7 +59,7 @@ pub struct IsoConfig {
     pub live_payload_layout: LivePayloadLayout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum LivePayloadLayout {
     /// Keep payloads as files under `live/` in ISO filesystem.
     IsoFiles,
@@ -114,62 +113,6 @@ impl IsoConfig {
             live_payload_layout: LivePayloadLayout::AppendedPartitions,
         }
     }
-
-    /// Add a prebuilt UKI file.
-    pub fn with_prebuilt_uki(mut self, path: impl Into<PathBuf>) -> Self {
-        self.ukis.push(UkiSource::Prebuilt(path.into()));
-        self
-    }
-
-    /// Add a UKI to build.
-    pub fn with_uki(
-        mut self,
-        name: impl Into<String>,
-        extra_cmdline: impl Into<String>,
-        filename: impl Into<String>,
-    ) -> Self {
-        self.ukis.push(UkiSource::Build {
-            name: name.into(),
-            extra_cmdline: extra_cmdline.into(),
-            filename: filename.into(),
-        });
-        self
-    }
-
-    /// Set live overlay payload image (EROFS).
-    pub fn with_overlay_image(mut self, path: impl Into<PathBuf>) -> Self {
-        self.overlay_image = Some(path.into());
-        self
-    }
-
-    /// Legacy compatibility alias for `with_overlay_image`.
-    pub fn with_overlay(self, path: impl Into<PathBuf>) -> Self {
-        self.with_overlay_image(path)
-    }
-
-    /// Set OS release branding.
-    pub fn with_os_release(mut self, name: &str, id: &str, version: &str) -> Self {
-        self.os_release = Some(OsRelease::new(name, id, version));
-        self
-    }
-
-    /// Add an extra file to copy to ISO.
-    pub fn with_extra_file(mut self, src: impl Into<PathBuf>, dst: impl Into<String>) -> Self {
-        self.extra_files.push((src.into(), dst.into()));
-        self
-    }
-
-    /// Disable checksum generation.
-    pub fn without_checksum(mut self) -> Self {
-        self.generate_checksum = false;
-        self
-    }
-
-    /// Force legacy payload placement (`live/*.erofs` files in ISO filesystem).
-    pub fn with_live_payload_iso_files(mut self) -> Self {
-        self.live_payload_layout = LivePayloadLayout::IsoFiles;
-        self
-    }
 }
 
 /// Create a bootable ISO from the given configuration.
@@ -191,7 +134,7 @@ impl IsoConfig {
 /// - Required input files don't exist
 /// - systemd-boot is not installed
 /// - xorriso fails
-pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
+pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf> {
     // Stage 1: Validate inputs
     validate_inputs(config)?;
 
@@ -204,14 +147,14 @@ pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
     let iso_root = output_dir.join("iso-root");
 
     // Stage 2: Set up ISO directory structure
-    println!("Setting up ISO structure...");
+    progress("Setting up ISO structure...");
     setup_iso_structure(&iso_root)?;
 
     // Stage 3: Copy core files
-    copy_core_files(config, &iso_root)?;
+    copy_core_files(config, &iso_root, progress)?;
 
     // Stage 4: Set up UEFI boot with UKIs
-    setup_uefi_boot(config, &iso_root, &output_dir)?;
+    setup_uefi_boot(config, &iso_root, &output_dir, progress)?;
 
     // Stage 5: Copy extra files
     for (src, dst) in &config.extra_files {
@@ -224,7 +167,7 @@ pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
     }
 
     // Stage 6: Create ISO
-    println!("Creating ISO with xorriso...");
+    progress("Creating ISO with xorriso...");
     let mut appended = Vec::new();
     if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
         appended.push(AppendedPartition {
@@ -250,16 +193,16 @@ pub fn create_iso(config: &IsoConfig) -> Result<PathBuf> {
 
     // Stage 7: Generate checksum
     if config.generate_checksum {
-        println!("Generating checksum...");
+        progress("Generating checksum...");
         generate_iso_checksum(&config.output)?;
     }
 
     // Cleanup
     let _ = fs::remove_dir_all(&iso_root);
 
-    println!("\nISO created: {}", config.output.display());
+    progress(&format!("\nISO created: {}", config.output.display()));
     if let Ok(meta) = fs::metadata(&config.output) {
-        println!("  Size: {} MB", meta.len() / 1024 / 1024);
+        progress(&format!("  Size: {} MB", meta.len() / 1024 / 1024));
     }
 
     Ok(config.output.clone())
@@ -309,8 +252,8 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
 }
 
 /// Copy kernel, initramfs, rootfs to ISO structure.
-fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
-    println!("Copying boot files...");
+fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str)) -> Result<()> {
+    progress("Copying boot files...");
 
     // Copy kernel
     fs::copy(&config.kernel, iso_root.join(KERNEL_ISO_PATH)).context("Failed to copy kernel")?;
@@ -320,18 +263,18 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
         .context("Failed to copy initramfs")?;
 
     if config.live_payload_layout == LivePayloadLayout::IsoFiles {
-        println!("Copying rootfs...");
+        progress("Copying rootfs...");
         fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH))
             .context("Failed to copy rootfs")?;
 
         if let Some(ref overlay_image) = config.overlay_image {
-            println!("Copying live overlay image...");
+            progress("Copying live overlay image...");
             fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
                 .context("Failed to copy live overlay image")?;
         }
     } else {
-        println!(
-            "Live payload layout: appended partitions (rootfs/overlay not copied into ISO filesystem)"
+        progress(
+            "Live payload layout: appended partitions (rootfs/overlay not copied into ISO filesystem)",
         );
     }
 
@@ -339,8 +282,8 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path) -> Result<()> {
 }
 
 /// Set up UEFI boot with systemd-boot and UKIs.
-fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Result<()> {
-    println!("Setting up UEFI boot...");
+fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path, progress: &dyn Fn(&str)) -> Result<()> {
+    progress("Setting up UEFI boot...");
 
     let systemd_boot = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
     let uki_dir = iso_root.join("EFI/Linux");
@@ -386,12 +329,9 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
                 let output = uki_dir.join(filename);
                 let mut uki_config =
                     recuki::UkiConfig::new(&config.kernel, &config.initrd, &cmdline, &output);
+                uki_config.os_release = config.os_release.clone();
 
-                if let Some(ref os) = config.os_release {
-                    uki_config = uki_config.with_os_release(&os.name, &os.id, &os.version);
-                }
-
-                println!("  Building UKI: {}", filename);
+                progress(&format!("  Building UKI: {}", filename));
                 recuki::build_uki(&uki_config)?;
                 uki_entries.push(UkiMenuEntry {
                     title: name.clone(),
@@ -408,12 +348,9 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
         let output = uki_dir.join(&filename);
         let mut uki_config =
             recuki::UkiConfig::new(&config.kernel, &config.initrd, &base_cmdline, &output);
+        uki_config.os_release = config.os_release.clone();
 
-        if let Some(ref os) = config.os_release {
-            uki_config = uki_config.with_os_release(&os.name, &os.id, &os.version);
-        }
-
-        println!("  Building UKI: {}", filename);
+        progress(&format!("  Building UKI: {}", filename));
         recuki::build_uki(&uki_config)?;
         let title = config
             .os_release
@@ -436,9 +373,8 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
 
     let default_entry = uki_entries
         .first()
-        .map(|entry| entry_id(&entry.filename))
-        .unwrap_or_else(|| "default.conf".to_string());
-    let default_entry = default_entry.trim_end_matches(".conf").to_string();
+        .map(|entry| entry_stem(&entry.filename).to_string())
+        .unwrap_or_else(|| "default".to_string());
     let loader_config = LoaderConfig::with_defaults("default")
         .with_default_entry(default_entry)
         .with_timeout(5)
@@ -451,7 +387,7 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path) -> Re
     write_loader_entries(&loader_dir, &uki_entries)?;
 
     // Create EFI boot image
-    build_efi_boot_image(iso_root, output_dir, &uki_entries)?;
+    build_efi_boot_image(iso_root, output_dir, &uki_entries, progress)?;
 
     Ok(())
 }
@@ -461,8 +397,9 @@ fn build_efi_boot_image(
     iso_root: &Path,
     output_dir: &Path,
     uki_entries: &[UkiMenuEntry],
+    progress: &dyn Fn(&str),
 ) -> Result<()> {
-    println!("Creating EFI boot image...");
+    progress("Creating EFI boot image...");
 
     let efiboot_img = output_dir.join("efiboot.img");
 
@@ -528,8 +465,9 @@ fn build_efi_boot_image(
     Ok(())
 }
 
-fn entry_id(filename: &str) -> String {
-    format!("{}.conf", filename.trim_end_matches(".efi"))
+/// The loader entry name for a UKI file (`name.efi` → `name`).
+fn entry_stem(filename: &str) -> &str {
+    filename.trim_end_matches(".efi")
 }
 
 fn write_loader_entries(loader_dir: &Path, entries: &[UkiMenuEntry]) -> Result<()> {
@@ -537,7 +475,7 @@ fn write_loader_entries(loader_dir: &Path, entries: &[UkiMenuEntry]) -> Result<(
     fs::create_dir_all(&entries_dir)
         .with_context(|| format!("creating loader entries dir '{}'", entries_dir.display()))?;
     for entry in entries {
-        let entry_path = entries_dir.join(entry_id(&entry.filename));
+        let entry_path = entries_dir.join(format!("{}.conf", entry_stem(&entry.filename)));
         let content = format!(
             "title {}\nlinux /EFI/Linux/{}\n",
             entry.title, entry.filename

@@ -3,10 +3,11 @@
 //! Creates ISOs with UKI (Unified Kernel Image) boot using systemd-boot.
 
 use anyhow::{bail, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use std::path::PathBuf;
 
 use reciso::{create_iso, IsoConfig, LivePayloadLayout, UkiSource};
+use recuki::OsRelease;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -80,15 +81,15 @@ struct Args {
     overlay_image: Option<PathBuf>,
 
     /// OS name for UKI branding (e.g., "LevitateOS")
-    #[arg(long = "os-name")]
+    #[arg(long = "os-name", requires_all = ["os_id", "os_version"])]
     os_name: Option<String>,
 
     /// OS identifier for UKI branding (e.g., "levitateos")
-    #[arg(long = "os-id")]
+    #[arg(long = "os-id", requires_all = ["os_name", "os_version"])]
     os_id: Option<String>,
 
     /// OS version for UKI branding (e.g., "1.0")
-    #[arg(long = "os-version")]
+    #[arg(long = "os-version", requires_all = ["os_name", "os_id"])]
     os_version: Option<String>,
 
     /// Skip checksum generation
@@ -102,7 +103,7 @@ struct Args {
         value_enum,
         value_name = "LAYOUT"
     )]
-    live_payload_layout: RecisoPayloadLayoutArg,
+    live_payload_layout: LivePayloadLayout,
 
     /// Quiet mode - only print errors
     #[arg(short = 'q', long = "quiet")]
@@ -167,12 +168,7 @@ fn main() -> Result<()> {
 
     // Add OS branding
     if let (Some(name), Some(id), Some(version)) = (&args.os_name, &args.os_id, &args.os_version) {
-        config = config.with_os_release(name, id, version);
-    } else if args.os_name.is_some() || args.os_id.is_some() || args.os_version.is_some() {
-        eprintln!(
-            "Warning: Partial OS release info provided. \
-             Need all of --os-name, --os-id, and --os-version for branding."
-        );
+        config.os_release = Some(OsRelease::new(name, id, version));
     }
 
     // Checksum setting
@@ -180,10 +176,7 @@ fn main() -> Result<()> {
         config.generate_checksum = false;
     }
 
-    config.live_payload_layout = match args.live_payload_layout {
-        RecisoPayloadLayoutArg::AppendedPartitions => LivePayloadLayout::AppendedPartitions,
-        RecisoPayloadLayoutArg::IsoFiles => LivePayloadLayout::IsoFiles,
-    };
+    config.live_payload_layout = args.live_payload_layout;
 
     if !args.quiet {
         println!("Creating ISO: {}", args.output.display());
@@ -206,21 +199,16 @@ fn main() -> Result<()> {
         println!();
     }
 
-    create_iso(&config)?;
+    let quiet = args.quiet;
+    create_iso(&config, &|message: &str| {
+        if !quiet {
+            println!("{message}");
+        }
+    })?;
 
     if !args.quiet {
         println!("\nDone.");
     }
 
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum RecisoPayloadLayoutArg {
-    /// Keep payloads as files under `live/` in ISO filesystem.
-    #[value(name = "iso-files")]
-    IsoFiles,
-    /// Append payloads as GPT partitions.
-    #[value(name = "appended-partitions")]
-    AppendedPartitions,
 }
