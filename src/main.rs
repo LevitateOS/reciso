@@ -54,7 +54,7 @@ struct Args {
     #[arg(short = 'r', long = "rootfs")]
     rootfs: PathBuf,
 
-    /// ISO volume label (used for boot device detection)
+    /// ISO volume label
     #[arg(short = 'l', long = "label")]
     label: String,
 
@@ -117,7 +117,6 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Build config
     let mut config = IsoConfig::new(
         &args.kernel,
         &args.initrd,
@@ -126,12 +125,10 @@ fn main() -> Result<()> {
         &args.output,
     );
 
-    // Add prebuilt UKIs
     for uki in &args.ukis {
         config.ukis.push(UkiSource::Prebuilt(uki.clone()));
     }
 
-    // Parse and add build-uki specs
     for spec in &args.build_ukis {
         // name:cmdline:filename — the name ends at the first ':' and the file
         // name starts after the last, so the command line may contain ':'.
@@ -153,7 +150,6 @@ fn main() -> Result<()> {
         });
     }
 
-    // Parse and add extra files
     for spec in &args.extra_files {
         let parts: Vec<&str> = spec.splitn(2, ':').collect();
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
@@ -169,17 +165,14 @@ fn main() -> Result<()> {
             .push((PathBuf::from(parts[0]), parts[1].to_string()));
     }
 
-    // Add live overlay payload image
     if let Some(overlay_image) = args.overlay_image {
         config.overlay_image = Some(overlay_image);
     }
 
-    // Add OS branding
     if let (Some(name), Some(id), Some(version)) = (&args.os_name, &args.os_id, &args.os_version) {
         config.os_release = Some(OsRelease::new(name, id, version));
     }
 
-    // Checksum setting
     if args.no_checksum {
         config.generate_checksum = false;
     }

@@ -9,7 +9,7 @@
 //! use reciso::{IsoConfig, create_iso};
 //!
 //! let config = IsoConfig::new("vmlinuz", "initramfs.img", "rootfs.erofs", "MYISO", "output.iso");
-//! create_iso(&config)?;
+//! create_iso(&config, &|msg| eprintln!("{msg}"))?;
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -30,7 +30,6 @@ use recuki::OsRelease;
 /// pass its own rootfs's copy.
 pub use distro_spec::shared::SYSTEMD_BOOT_EFI as DEFAULT_SYSTEMD_BOOT_EFI;
 
-/// Configuration for creating an ISO.
 #[derive(Debug, Clone)]
 pub struct IsoConfig {
     /// Path to kernel image (vmlinuz).
@@ -39,9 +38,8 @@ pub struct IsoConfig {
     pub initrd: PathBuf,
     /// Path to rootfs image (EROFS).
     pub rootfs: PathBuf,
-    /// ISO volume label (used for boot device detection).
+    /// ISO volume label; also the `root=LABEL=` on the UKI command line.
     pub label: String,
-    /// Output ISO path.
     pub output: PathBuf,
     /// UKI sources (prebuilt files or build specs).
     pub ukis: Vec<UkiSource>,
@@ -91,7 +89,6 @@ struct UkiMenuEntry {
 }
 
 impl IsoConfig {
-    /// Create a new ISO configuration.
     pub fn new(
         kernel: impl Into<PathBuf>,
         initrd: impl Into<PathBuf>,
@@ -116,27 +113,20 @@ impl IsoConfig {
     }
 }
 
-/// Create a bootable ISO from the given configuration.
+/// Create a bootable ISO and return its path.
 ///
-/// # Process
-///
-/// 1. Validate inputs exist
-/// 2. Create ISO directory structure (boot/, live/, EFI/BOOT/)
-/// 3. Copy kernel, initramfs, rootfs to ISO
-/// 4. Build or copy UKIs
-/// 5. Set up systemd-boot
-/// 6. Create EFI boot image
-/// 7. Run xorriso to create final ISO
-/// 8. Generate checksum (optional)
+/// The rootfs and overlay images go in as files under `live/` or as appended
+/// GPT partitions, per `live_payload_layout`. Everything is built in a private
+/// directory next to the output, and the ISO is moved into place only when
+/// complete.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - Required input files don't exist
-/// - systemd-boot is not installed
-/// - xorriso fails
+/// - The systemd-boot binary is missing
+/// - Building a UKI or running xorriso fails
 pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf> {
-    // Stage 1: Validate inputs
     validate_inputs(config)?;
 
     // Everything is built in a private directory next to the output and
@@ -153,17 +143,13 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
         .with_context(|| format!("creating a work directory in {}", output_dir.display()))?;
     let iso_root = work.path().join("iso-root");
 
-    // Stage 2: Set up ISO directory structure
     progress("Setting up ISO structure...");
     setup_iso_structure(&iso_root)?;
 
-    // Stage 3: Copy core files
     copy_core_files(config, &iso_root, progress)?;
 
-    // Stage 4: Set up UEFI boot with UKIs
     setup_uefi_boot(config, &iso_root, progress)?;
 
-    // Stage 5: Copy extra files
     for (src, dst) in &config.extra_files {
         let dst_path = iso_root.join(dst);
         if let Some(parent) = dst_path.parent() {
@@ -173,7 +159,6 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
             .with_context(|| format!("Failed to copy {} to {}", src.display(), dst))?;
     }
 
-    // Stage 6: Create ISO
     progress("Creating ISO with xorriso...");
     let mut appended = Vec::new();
     if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
@@ -195,7 +180,7 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     fs::rename(&built, &config.output)
         .with_context(|| format!("moving the ISO to {}", config.output.display()))?;
 
-    // Stage 7: Generate checksum (of the final file, under its final name)
+    // Checksum the final file, under its final name.
     if config.generate_checksum {
         progress("Generating checksum...");
         let checksum = iso::write_checksum(&config.output)?;
@@ -210,7 +195,6 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     Ok(config.output.clone())
 }
 
-/// Validate that required input files exist.
 fn validate_inputs(config: &IsoConfig) -> Result<()> {
     if !config.kernel.exists() {
         bail!("Kernel not found: {}", config.kernel.display());
@@ -250,14 +234,13 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
     Ok(())
 }
 
-/// Copy kernel, initramfs, rootfs to ISO structure.
+/// Copy kernel and initramfs into the ISO tree, and the payload images too
+/// when they are laid out as ISO files.
 fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str)) -> Result<()> {
     progress("Copying boot files...");
 
-    // Copy kernel
     fs::copy(&config.kernel, iso_root.join(KERNEL_ISO_PATH)).context("Failed to copy kernel")?;
 
-    // Copy initramfs
     fs::copy(&config.initrd, iso_root.join(INITRAMFS_LIVE_ISO_PATH))
         .context("Failed to copy initramfs")?;
 
@@ -287,11 +270,11 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     let uki_dir = iso_root.join(distro_spec::shared::UKI_EFI_DIR);
     fs::create_dir_all(&uki_dir)?;
 
-    // The live init finds its boot medium by label; everything else on the
-    // command line (consoles, distro switches) comes from the caller.
+    // The live init only reports root=LABEL= (it finds its boot medium by
+    // probing); everything else on the command line (consoles, distro
+    // switches) comes from the caller.
     let base_cmdline = format!("root=LABEL={}", config.label);
 
-    // Process UKIs
     let mut uki_entries: Vec<UkiMenuEntry> = Vec::new();
 
     for uki in &config.ukis {
@@ -338,7 +321,6 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
         }
     }
 
-    // If no UKIs specified, build a default one
     if uki_entries.is_empty() {
         let filename = format!("{}.efi", config.label.to_lowercase());
         let output = uki_dir.join(&filename);
@@ -360,10 +342,8 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
         });
     }
 
-    // Copy systemd-boot
     fs::copy(&config.systemd_boot, iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER))?;
 
-    // Create loader.conf
     let loader_dir = iso_root.join("loader");
     fs::create_dir_all(&loader_dir)?;
 
@@ -382,7 +362,6 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     )?;
     write_loader_entries(&loader_dir, &uki_entries)?;
 
-    // Create EFI boot image
     build_efi_boot_image(iso_root, &uki_entries, progress)?;
 
     Ok(())
