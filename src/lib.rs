@@ -20,6 +20,7 @@ mod iso;
 
 use distro_spec::shared::{
     LoaderConfig, EFIBOOT_FILENAME, EFI_BOOTLOADER, INITRAMFS_LIVE_ISO_PATH, ISO_EFI_DIR,
+    LOADER_CONF_FILENAME, LOADER_ENTRIES_DIR, UKI_EFI_DIR,
     KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH,
 };
 use iso::{create_fat16_image, mcopy, mmd, run_xorriso, setup_iso_structure, AppendedPartition};
@@ -267,7 +268,7 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
 fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str)) -> Result<()> {
     progress("Setting up UEFI boot...");
 
-    let uki_dir = iso_root.join(distro_spec::shared::UKI_EFI_DIR);
+    let uki_dir = iso_root.join(UKI_EFI_DIR);
     fs::create_dir_all(&uki_dir)?;
 
     // The live init only reports root=LABEL= (it finds its boot medium by
@@ -344,20 +345,16 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
 
     fs::copy(&config.systemd_boot, iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER))?;
 
-    let loader_dir = iso_root.join("loader");
+    let loader_dir = iso_root.join(LOADER_ENTRIES_DIR);
     fs::create_dir_all(&loader_dir)?;
 
-    let default_entry = uki_entries
-        .first()
-        .map(|entry| entry_stem(&entry.filename).to_string())
-        .unwrap_or_else(|| "default".to_string());
-    let loader_config = LoaderConfig::with_defaults("default")
-        .with_default_entry(default_entry)
+    let first = uki_entries.first().context("the ISO has no boot entries")?;
+    let loader_config = LoaderConfig::with_defaults(entry_stem(&first.filename))
         .with_timeout(5)
         .with_console_mode("max");
 
     fs::write(
-        loader_dir.join("loader.conf"),
+        loader_dir.join(LOADER_CONF_FILENAME),
         loader_config.to_loader_conf(),
     )?;
     write_loader_entries(&loader_dir, &uki_entries)?;
@@ -377,7 +374,7 @@ fn build_efi_boot_image(
     progress("Creating EFI boot image...");
 
     let bootloader = iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER);
-    let entries_dir = iso_root.join("loader/entries");
+    let entries_dir = iso_root.join(LOADER_ENTRIES_DIR).join("entries");
     let mut entries: Vec<_> = if entries_dir.is_dir() {
         fs::read_dir(&entries_dir)?
             .map(|e| e.map(|e| e.path()))
@@ -396,16 +393,23 @@ fn build_efi_boot_image(
 
     let image = iso_root.join(EFIBOOT_FILENAME);
     create_fat16_image(&image, size_mb)?;
-    for dir in ["::EFI", "::EFI/BOOT", "::EFI/Linux", "::loader", "::loader/entries"] {
-        mmd(&image, dir)?;
+    // The ESP holds the same tree as the ISO: mtools paths are `::<path>`.
+    let esp = |path: &str| format!("::{path}");
+    let entries_path = format!("{LOADER_ENTRIES_DIR}/entries");
+    for dir in ["EFI", ISO_EFI_DIR, UKI_EFI_DIR, LOADER_ENTRIES_DIR, entries_path.as_str()] {
+        mmd(&image, &esp(dir))?;
     }
-    mcopy(&image, &bootloader, "::EFI/BOOT/")?;
+    mcopy(&image, &bootloader, &esp(&format!("{ISO_EFI_DIR}/")))?;
     for uki in uki_entries {
-        mcopy(&image, &uki.path, "::EFI/Linux/")?;
+        mcopy(&image, &uki.path, &esp(&format!("{UKI_EFI_DIR}/")))?;
     }
-    mcopy(&image, &iso_root.join("loader/loader.conf"), "::loader/")?;
+    mcopy(
+        &image,
+        &iso_root.join(LOADER_ENTRIES_DIR).join(LOADER_CONF_FILENAME),
+        &esp(&format!("{LOADER_ENTRIES_DIR}/")),
+    )?;
     for entry in entries {
-        mcopy(&image, &entry, "::loader/entries/")?;
+        mcopy(&image, &entry, &esp(&format!("{entries_path}/")))?;
     }
     Ok(())
 }
@@ -422,7 +426,7 @@ fn write_loader_entries(loader_dir: &Path, entries: &[UkiMenuEntry]) -> Result<(
     for entry in entries {
         let entry_path = entries_dir.join(format!("{}.conf", entry_stem(&entry.filename)));
         let content = format!(
-            "title {}\nlinux /EFI/Linux/{}\n",
+            "title {}\nlinux /{UKI_EFI_DIR}/{}\n",
             entry.title, entry.filename
         );
         fs::write(&entry_path, content)
