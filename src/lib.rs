@@ -15,22 +15,20 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use distro_builder::{
-    create_efi_dirs_in_fat, create_fat16_image, generate_iso_checksum, mcopy_to_fat, run_xorriso,
-    setup_iso_structure, AppendedPartition,
-};
+mod iso;
+
 use distro_spec::shared::{
-    LoaderConfig, INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH,
-    ROOTFS_ISO_PATH, SELINUX_DISABLE,
+    LoaderConfig, EFIBOOT_FILENAME, EFI_BOOTLOADER, INITRAMFS_LIVE_ISO_PATH, ISO_EFI_DIR,
+    KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH,
 };
+use iso::{create_fat16_image, mcopy, mmd, run_xorriso, setup_iso_structure, AppendedPartition};
 
 use recuki::OsRelease;
 
-/// Default EFI boot image size in MB.
-/// UKIs require ~50MB each. With 3 UKIs + systemd-boot, need ~200MB.
-pub const DEFAULT_EFIBOOT_SIZE_MB: u32 = 200;
+/// Default systemd-boot UEFI binary (the build host's); a variant should
+/// pass its own rootfs's copy.
+pub use distro_spec::shared::SYSTEMD_BOOT_EFI as DEFAULT_SYSTEMD_BOOT_EFI;
 
 /// Configuration for creating an ISO.
 #[derive(Debug, Clone)]
@@ -57,6 +55,8 @@ pub struct IsoConfig {
     pub generate_checksum: bool,
     /// How to place rootfs/overlay payloads on boot media.
     pub live_payload_layout: LivePayloadLayout,
+    /// systemd-boot UEFI binary to boot the ISO with.
+    pub systemd_boot: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -111,6 +111,7 @@ impl IsoConfig {
             extra_files: Vec::new(),
             generate_checksum: true,
             live_payload_layout: LivePayloadLayout::AppendedPartitions,
+            systemd_boot: PathBuf::from(DEFAULT_SYSTEMD_BOOT_EFI),
         }
     }
 }
@@ -138,13 +139,19 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     // Stage 1: Validate inputs
     validate_inputs(config)?;
 
-    // Create temp working directory alongside output
+    // Everything is built in a private directory next to the output and
+    // removed afterwards; the ISO is moved into place only when complete.
     let output_dir = config
         .output
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
         .to_path_buf();
-    let iso_root = output_dir.join("iso-root");
+    let work = tempfile::Builder::new()
+        .prefix(".reciso-")
+        .tempdir_in(&output_dir)
+        .with_context(|| format!("creating a work directory in {}", output_dir.display()))?;
+    let iso_root = work.path().join("iso-root");
 
     // Stage 2: Set up ISO directory structure
     progress("Setting up ISO structure...");
@@ -154,7 +161,7 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     copy_core_files(config, &iso_root, progress)?;
 
     // Stage 4: Set up UEFI boot with UKIs
-    setup_uefi_boot(config, &iso_root, &output_dir, progress)?;
+    setup_uefi_boot(config, &iso_root, progress)?;
 
     // Stage 5: Copy extra files
     for (src, dst) in &config.extra_files {
@@ -183,22 +190,17 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
             });
         }
     }
-    run_xorriso(
-        &iso_root,
-        &config.output,
-        &config.label,
-        "efiboot.img",
-        &appended,
-    )?;
+    let built = work.path().join("output.iso");
+    run_xorriso(&iso_root, &built, &config.label, EFIBOOT_FILENAME, &appended)?;
+    fs::rename(&built, &config.output)
+        .with_context(|| format!("moving the ISO to {}", config.output.display()))?;
 
-    // Stage 7: Generate checksum
+    // Stage 7: Generate checksum (of the final file, under its final name)
     if config.generate_checksum {
         progress("Generating checksum...");
-        generate_iso_checksum(&config.output)?;
+        let checksum = iso::write_checksum(&config.output)?;
+        progress(&format!("  Wrote: {}", checksum.display()));
     }
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&iso_root);
 
     progress(&format!("\nISO created: {}", config.output.display()));
     if let Ok(meta) = fs::metadata(&config.output) {
@@ -238,13 +240,10 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
         }
     }
 
-    // Check for systemd-boot
-    let systemd_boot = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    if !systemd_boot.exists() {
+    if !config.systemd_boot.is_file() {
         bail!(
-            "systemd-boot not found at {}.\n\
-             Install: sudo dnf install systemd-boot",
-            systemd_boot.display()
+            "systemd-boot not found at {} (pass --systemd-boot)",
+            config.systemd_boot.display()
         );
     }
 
@@ -282,18 +281,15 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
 }
 
 /// Set up UEFI boot with systemd-boot and UKIs.
-fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path, progress: &dyn Fn(&str)) -> Result<()> {
+fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str)) -> Result<()> {
     progress("Setting up UEFI boot...");
 
-    let systemd_boot = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    let uki_dir = iso_root.join("EFI/Linux");
+    let uki_dir = iso_root.join(distro_spec::shared::UKI_EFI_DIR);
     fs::create_dir_all(&uki_dir)?;
 
-    // Build base cmdline
-    let base_cmdline = format!(
-        "root=LABEL={} console=ttyS0,115200n8 console=tty0 {}",
-        config.label, SELINUX_DISABLE
-    );
+    // The live init finds its boot medium by label; everything else on the
+    // command line (consoles, distro switches) comes from the caller.
+    let base_cmdline = format!("root=LABEL={}", config.label);
 
     // Process UKIs
     let mut uki_entries: Vec<UkiMenuEntry> = Vec::new();
@@ -365,7 +361,7 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path, progr
     }
 
     // Copy systemd-boot
-    fs::copy(systemd_boot, iso_root.join("EFI/BOOT/BOOTX64.EFI"))?;
+    fs::copy(&config.systemd_boot, iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER))?;
 
     // Create loader.conf
     let loader_dir = iso_root.join("loader");
@@ -387,81 +383,51 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, output_dir: &Path, progr
     write_loader_entries(&loader_dir, &uki_entries)?;
 
     // Create EFI boot image
-    build_efi_boot_image(iso_root, output_dir, &uki_entries, progress)?;
+    build_efi_boot_image(iso_root, &uki_entries, progress)?;
 
     Ok(())
 }
 
-/// Create EFI boot image with systemd-boot and UKIs.
+/// Create the EFI system partition image (systemd-boot, UKIs, loader config)
+/// inside the ISO tree, sized from what goes into it.
 fn build_efi_boot_image(
     iso_root: &Path,
-    output_dir: &Path,
     uki_entries: &[UkiMenuEntry],
     progress: &dyn Fn(&str),
 ) -> Result<()> {
     progress("Creating EFI boot image...");
 
-    let efiboot_img = output_dir.join("efiboot.img");
+    let bootloader = iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER);
+    let entries_dir = iso_root.join("loader/entries");
+    let mut entries: Vec<_> = if entries_dir.is_dir() {
+        fs::read_dir(&entries_dir)?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<_>>()?
+    } else {
+        Vec::new()
+    };
+    entries.sort();
 
-    // Create FAT16 image
-    create_fat16_image(&efiboot_img, DEFAULT_EFIBOOT_SIZE_MB)?;
+    let payload: u64 = std::iter::once(bootloader.as_path())
+        .chain(uki_entries.iter().map(|u| u.path.as_path()))
+        .map(|p| fs::metadata(p).map(|m| m.len()))
+        .sum::<std::io::Result<u64>>()?;
+    // FAT overhead and slack: 20% plus 8 MB, at least 16 MB.
+    let size_mb = (payload * 12 / 10 / (1024 * 1024) + 8).max(16);
 
-    // Create directory structure
-    create_efi_dirs_in_fat(&efiboot_img)?;
-
-    // Create EFI/Linux directory
-    let img_str = efiboot_img.to_string_lossy();
-    Command::new("mmd")
-        .args(["-i", &img_str, "::EFI/Linux"])
-        .output()
-        .context("mmd failed to create ::EFI/Linux")?;
-
-    // Copy systemd-boot
-    mcopy_to_fat(
-        &efiboot_img,
-        &iso_root.join("EFI/BOOT/BOOTX64.EFI"),
-        "::EFI/BOOT/",
-    )?;
-
-    // Copy UKIs
+    let image = iso_root.join(EFIBOOT_FILENAME);
+    create_fat16_image(&image, size_mb)?;
+    for dir in ["::EFI", "::EFI/BOOT", "::EFI/Linux", "::loader", "::loader/entries"] {
+        mmd(&image, dir)?;
+    }
+    mcopy(&image, &bootloader, "::EFI/BOOT/")?;
     for uki in uki_entries {
-        mcopy_to_fat(&efiboot_img, &uki.path, "::EFI/Linux/")?;
+        mcopy(&image, &uki.path, "::EFI/Linux/")?;
     }
-
-    // Create loader directory and copy loader.conf
-    Command::new("mmd")
-        .args(["-i", &img_str, "::loader"])
-        .output()
-        .context("mmd failed to create ::loader")?;
-
-    mcopy_to_fat(
-        &efiboot_img,
-        &iso_root.join("loader/loader.conf"),
-        "::loader/",
-    )?;
-    if iso_root.join("loader/entries").is_dir() {
-        Command::new("mmd")
-            .args(["-i", &img_str, "::loader/entries"])
-            .output()
-            .context("mmd failed to create ::loader/entries")?;
-        let entries = fs::read_dir(iso_root.join("loader/entries"))
-            .context("reading loader entries for efiboot image")?;
-        for entry in entries {
-            let entry = entry.context("reading loader entries dir entry")?;
-            let entry_path = entry.path();
-            if entry_path.extension().and_then(|e| e.to_str()) != Some("conf") {
-                continue;
-            }
-            mcopy_to_fat(&efiboot_img, &entry_path, "::loader/entries/")?;
-        }
+    mcopy(&image, &iso_root.join("loader/loader.conf"), "::loader/")?;
+    for entry in entries {
+        mcopy(&image, &entry, "::loader/entries/")?;
     }
-
-    // Copy efiboot.img into iso-root for xorriso
-    fs::copy(&efiboot_img, iso_root.join("efiboot.img"))?;
-
-    // Cleanup temp file
-    let _ = fs::remove_file(&efiboot_img);
-
     Ok(())
 }
 

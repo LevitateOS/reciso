@@ -105,6 +105,10 @@ struct Args {
     )]
     live_payload_layout: LivePayloadLayout,
 
+    /// systemd-boot UEFI binary (default: the build host's)
+    #[arg(long = "systemd-boot", default_value = reciso::DEFAULT_SYSTEMD_BOOT_EFI)]
+    systemd_boot: PathBuf,
+
     /// Quiet mode - only print errors
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
@@ -129,19 +133,23 @@ fn main() -> Result<()> {
 
     // Parse and add build-uki specs
     for spec in &args.build_ukis {
-        let parts: Vec<&str> = spec.splitn(3, ':').collect();
-        if parts.len() != 3 {
+        // name:cmdline:filename — the name ends at the first ':' and the file
+        // name starts after the last, so the command line may contain ':'.
+        let parts: Option<(&str, &str, &str)> = spec.split_once(':').and_then(|(name, rest)| {
+            rest.rsplit_once(':').map(|(cmdline, file)| (name, cmdline, file))
+        });
+        let Some((name, cmdline, filename)) = parts else {
             bail!(
                 "Invalid --build-uki format: '{}'\n\
                  Expected: 'name:extra_cmdline:filename'\n\
                  Example: 'Emergency:emergency:myos-emergency.efi'",
                 spec
             );
-        }
+        };
         config.ukis.push(UkiSource::Build {
-            name: parts[0].to_string(),
-            extra_cmdline: parts[1].to_string(),
-            filename: parts[2].to_string(),
+            name: name.to_string(),
+            extra_cmdline: cmdline.to_string(),
+            filename: filename.to_string(),
         });
     }
 
@@ -177,6 +185,7 @@ fn main() -> Result<()> {
     }
 
     config.live_payload_layout = args.live_payload_layout;
+    config.systemd_boot = args.systemd_boot.clone();
 
     if !args.quiet {
         println!("Creating ISO: {}", args.output.display());

@@ -10,6 +10,6 @@ description = "Create bootable UEFI ISOs from kernel + initramfs + rootfs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
-distro-builder = { path = "../../distro-builder" }
+tempfile = "3"
 distro-spec = { path = "../../distro-spec" }
 recuki = { path = "../recuki" }
