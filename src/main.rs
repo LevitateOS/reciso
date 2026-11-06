@@ -7,7 +7,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use reciso::{create_iso, IsoConfig, LivePayloadLayout, UkiSource};
-use recuki::OsRelease;
+use recuki::OsReleaseArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -80,17 +80,8 @@ struct Args {
     #[arg(long = "overlay-image")]
     overlay_image: Option<PathBuf>,
 
-    /// OS name for UKI branding (e.g., "LevitateOS")
-    #[arg(long = "os-name", requires_all = ["os_id", "os_version"])]
-    os_name: Option<String>,
-
-    /// OS identifier for UKI branding (e.g., "levitateos")
-    #[arg(long = "os-id", requires_all = ["os_name", "os_version"])]
-    os_id: Option<String>,
-
-    /// OS version for UKI branding (e.g., "1.0")
-    #[arg(long = "os-version", requires_all = ["os_name", "os_id"])]
-    os_version: Option<String>,
+    #[command(flatten)]
+    os: OsReleaseArgs,
 
     /// Skip checksum generation
     #[arg(long = "no-checksum")]
@@ -169,9 +160,7 @@ fn main() -> Result<()> {
         config.overlay_image = Some(overlay_image);
     }
 
-    if let (Some(name), Some(id), Some(version)) = (&args.os_name, &args.os_id, &args.os_version) {
-        config.os_release = Some(OsRelease::new(name, id, version));
-    }
+    config.os_release = args.os.os_release();
 
     if args.no_checksum {
         config.generate_checksum = false;
