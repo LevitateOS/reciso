@@ -18,11 +18,8 @@ use std::path::{Path, PathBuf};
 
 mod iso;
 
-use iso::{create_fat16_image, mcopy, mmd, run_xorriso, setup_iso_structure, AppendedPartition};
-use recinit::live::{
-    INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, OVERLAY_PAYLOAD_PARTITION,
-    ROOTFS_ISO_PATH, ROOTFS_PAYLOAD_PARTITION,
-};
+use iso::{create_fat16_image, mcopy, mmd, run_xorriso, setup_iso_structure};
+use recinit::live::{INITRAMFS_LIVE_ISO_PATH, KERNEL_ISO_PATH, LIVE_OVERLAYFS_ISO_PATH, ROOTFS_ISO_PATH};
 
 use recuki::OsRelease;
 
@@ -63,18 +60,17 @@ pub struct IsoConfig {
     pub extra_files: Vec<(PathBuf, String)>,
     /// Generate SHA512 checksum.
     pub generate_checksum: bool,
-    /// How to place rootfs/overlay payloads on boot media.
-    pub live_payload_layout: LivePayloadLayout,
     /// systemd-boot UEFI binary to boot the ISO with.
     pub systemd_boot: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// Where the live payloads go on the medium. The live init finds them as files
+/// under `live/` on the medium it found by label; there is no other layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum LivePayloadLayout {
-    /// Keep payloads as files under `live/` in ISO filesystem.
+    /// Payloads are files under `live/` in the ISO filesystem.
+    #[default]
     IsoFiles,
-    /// Append payload images as GPT partitions (direct block mounts in initramfs).
-    AppendedPartitions,
 }
 
 /// A UKI to build for the ISO's boot menu.
@@ -114,7 +110,6 @@ impl IsoConfig {
             os_release: None,
             extra_files: Vec::new(),
             generate_checksum: true,
-            live_payload_layout: LivePayloadLayout::AppendedPartitions,
             systemd_boot: PathBuf::from(DEFAULT_SYSTEMD_BOOT_EFI),
         }
     }
@@ -122,8 +117,7 @@ impl IsoConfig {
 
 /// Create a bootable ISO and return its path.
 ///
-/// The rootfs and overlay images go in as files under `live/` or as appended
-/// GPT partitions, per `live_payload_layout`. Everything is built in a private
+/// The rootfs and overlay images go in as files under `live/`. Everything is built in a private
 /// directory next to the output, and the ISO is moved into place only when
 /// complete.
 ///
@@ -167,23 +161,8 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     }
 
     progress("Creating ISO with xorriso...");
-    let mut appended = Vec::new();
-    if config.live_payload_layout == LivePayloadLayout::AppendedPartitions {
-        appended.push(AppendedPartition {
-            index: ROOTFS_PAYLOAD_PARTITION,
-            type_code: "0x83",
-            path: &config.rootfs,
-        });
-        if let Some(ref overlay_image) = config.overlay_image {
-            appended.push(AppendedPartition {
-                index: OVERLAY_PAYLOAD_PARTITION,
-                type_code: "0x83",
-                path: overlay_image,
-            });
-        }
-    }
     let built = work.path().join("output.iso");
-    run_xorriso(&iso_root, &built, &config.label, EFIBOOT_FILENAME, &appended)?;
+    run_xorriso(&iso_root, &built, &config.label, EFIBOOT_FILENAME)?;
     fs::rename(&built, &config.output)
         .with_context(|| format!("moving the ISO to {}", config.output.display()))?;
 
@@ -237,8 +216,7 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
     Ok(())
 }
 
-/// Copy kernel and initramfs into the ISO tree, and the payload images too
-/// when they are laid out as ISO files.
+/// Copy kernel, initramfs and the payload images into the ISO tree.
 fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str)) -> Result<()> {
     progress("Copying boot files...");
 
@@ -247,20 +225,13 @@ fn copy_core_files(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     fs::copy(&config.initrd, iso_root.join(INITRAMFS_LIVE_ISO_PATH))
         .context("Failed to copy initramfs")?;
 
-    if config.live_payload_layout == LivePayloadLayout::IsoFiles {
-        progress("Copying rootfs...");
-        fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH))
-            .context("Failed to copy rootfs")?;
+    progress("Copying rootfs...");
+    fs::copy(&config.rootfs, iso_root.join(ROOTFS_ISO_PATH)).context("Failed to copy rootfs")?;
 
-        if let Some(ref overlay_image) = config.overlay_image {
-            progress("Copying live overlay image...");
-            fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
-                .context("Failed to copy live overlay image")?;
-        }
-    } else {
-        progress(
-            "Live payload layout: appended partitions (rootfs/overlay not copied into ISO filesystem)",
-        );
+    if let Some(ref overlay_image) = config.overlay_image {
+        progress("Copying live overlay image...");
+        fs::copy(overlay_image, iso_root.join(LIVE_OVERLAYFS_ISO_PATH))
+            .context("Failed to copy live overlay image")?;
     }
 
     Ok(())
@@ -273,8 +244,7 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     let uki_dir = iso_root.join(UKI_EFI_DIR);
     fs::create_dir_all(&uki_dir)?;
 
-    // The live init only reports root=LABEL= (it finds its boot medium by
-    // probing); everything else on the command line (consoles, distro
+    // The live init finds its boot medium by this label; everything else on the command line (consoles, distro
     // switches) comes from the caller.
     let base_cmdline = format!("root=LABEL={}", config.label);
 

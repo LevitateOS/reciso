@@ -11,5 +11,5 @@ description = "Create bootable UEFI ISOs from kernel + initramfs + rootfs"
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 tempfile = "3"
-recinit = { path = "../recinit" }
+recinit = { path = "../recinit", default-features = false }
 recuki = { path = "../recuki" }

@@ -82,20 +82,12 @@ pub fn mcopy(fat_image: &Path, src: &Path, dst: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct AppendedPartition<'a> {
-    pub index: u32,
-    pub type_code: &'a str,
-    pub path: &'a Path,
-}
-
 /// Build the hybrid ISO with xorriso; `efiboot` is relative to `iso_root`.
 pub fn run_xorriso(
     iso_root: &Path,
     output: &Path,
     label: &str,
     efiboot: &str,
-    appended: &[AppendedPartition<'_>],
 ) -> Result<()> {
     let mut cmd = Command::new("xorriso");
     cmd.args(["-as", "mkisofs", "-o"])
@@ -104,13 +96,6 @@ pub fn run_xorriso(
         .args(["-partition_offset", &XORRISO_PARTITION_OFFSET.to_string()])
         .args(XORRISO_FS_FLAGS)
         .args(["-e", efiboot, "-no-emul-boot", "-isohybrid-gpt-basdat"]);
-    for part in appended {
-        cmd.args(["-append_partition", &part.index.to_string(), part.type_code])
-            .arg(part.path);
-    }
-    if !appended.is_empty() {
-        cmd.arg("-appended_part_as_gpt");
-    }
     cmd.arg(iso_root);
     run(&mut cmd, "building the ISO")?;
     Ok(())

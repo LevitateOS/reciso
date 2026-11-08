@@ -77,13 +77,8 @@ struct Args {
     #[arg(long = "no-checksum")]
     no_checksum: bool,
 
-    /// Layout for live payloads (`iso-files` or `appended-partitions`)
-    #[arg(
-        long = "live-payload-layout",
-        default_value = "appended-partitions",
-        value_enum,
-        value_name = "LAYOUT"
-    )]
+    /// Layout for live payloads (only `iso-files`, the default)
+    #[arg(long = "live-payload-layout", default_value = "iso-files", value_enum, value_name = "LAYOUT")]
     live_payload_layout: LivePayloadLayout,
 
     /// systemd-boot UEFI binary (default: the build host's)
@@ -152,7 +147,7 @@ fn main() -> Result<()> {
         config.generate_checksum = false;
     }
 
-    config.live_payload_layout = args.live_payload_layout;
+    let LivePayloadLayout::IsoFiles = args.live_payload_layout;
     config.systemd_boot = args.systemd_boot.clone();
 
     if !args.quiet {
