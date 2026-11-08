@@ -34,6 +34,8 @@ pub const UKI_EFI_DIR: &str = "EFI/Linux";
 /// systemd-boot's directory (`loader.conf` and `entries/`).
 pub const LOADER_ENTRIES_DIR: &str = "loader";
 pub const LOADER_CONF_FILENAME: &str = "loader.conf";
+/// The boot entries' directory in `LOADER_ENTRIES_DIR`.
+const ENTRIES_SUBDIR: &str = "entries";
 
 /// Default systemd-boot UEFI binary (the build host's); a variant should
 /// pass its own rootfs's copy.
@@ -56,7 +58,8 @@ pub struct IsoConfig {
     pub overlay_image: Option<PathBuf>,
     /// OS release information for UKI branding.
     pub os_release: Option<OsRelease>,
-    /// Additional files to copy to ISO root.
+    /// Additional files to copy into the ISO, each to a path relative to
+    /// its root (without `..`).
     pub extra_files: Vec<(PathBuf, String)>,
     /// Generate SHA512 checksum.
     pub generate_checksum: bool,
@@ -166,40 +169,46 @@ pub fn create_iso(config: &IsoConfig, progress: &dyn Fn(&str)) -> Result<PathBuf
     fs::rename(&built, &config.output)
         .with_context(|| format!("moving the ISO to {}", config.output.display()))?;
 
-    // Checksum the final file, under its final name.
+    // Checksum the final file, under its final name; without one, no older
+    // checksum is left beside the new ISO.
     if config.generate_checksum {
         progress("Generating checksum...");
         let checksum = iso::write_checksum(&config.output)?;
         progress(&format!("  Wrote: {}", checksum.display()));
+    } else {
+        iso::remove_checksum(&config.output)?;
     }
 
     progress(&format!("\nISO created: {}", config.output.display()));
-    if let Ok(meta) = fs::metadata(&config.output) {
-        progress(&format!("  Size: {} MB", meta.len() / 1024 / 1024));
-    }
+    let size = fs::metadata(&config.output)
+        .with_context(|| format!("reading {}", config.output.display()))?
+        .len();
+    progress(&format!("  Size: {} MiB", size / 1024 / 1024));
 
     Ok(config.output.clone())
 }
 
+/// Every input file, checked once before any work.
 fn validate_inputs(config: &IsoConfig) -> Result<()> {
-    if !config.kernel.exists() {
-        bail!("Kernel not found: {}", config.kernel.display());
-    }
-    if !config.initrd.exists() {
-        bail!("Initrd not found: {}", config.initrd.display());
-    }
-    if !config.rootfs.exists() {
-        bail!("Rootfs not found: {}", config.rootfs.display());
-    }
-    if let Some(ref overlay_image) = config.overlay_image {
-        if !overlay_image.exists() {
-            bail!("Overlay image not found: {}", overlay_image.display());
+    let files = [
+        ("kernel", &config.kernel),
+        ("initrd", &config.initrd),
+        ("rootfs", &config.rootfs),
+    ]
+    .into_iter()
+    .chain(config.overlay_image.iter().map(|path| ("overlay image", path)))
+    .chain(config.extra_files.iter().map(|(src, _)| ("extra file", src)));
+    for (what, path) in files {
+        if !path.is_file() {
+            bail!("the {what} {} is not a file", path.display());
         }
-        if !overlay_image.is_file() {
-            bail!(
-                "Overlay image path is not a file: {}",
-                overlay_image.display()
-            );
+    }
+    for (_, dst) in &config.extra_files {
+        let relative = Path::new(dst)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+        if dst.is_empty() || !relative {
+            bail!("extra file destination '{dst}' must be a path inside the ISO, without '..' or a leading '/'");
         }
     }
     if config.ukis.is_empty() {
@@ -301,7 +310,7 @@ fn build_efi_boot_image(
     progress("Creating EFI boot image...");
 
     let bootloader = iso_root.join(ISO_EFI_DIR).join(EFI_BOOTLOADER);
-    let entries_dir = iso_root.join(LOADER_ENTRIES_DIR).join("entries");
+    let entries_dir = iso_root.join(LOADER_ENTRIES_DIR).join(ENTRIES_SUBDIR);
     let mut entries: Vec<_> = if entries_dir.is_dir() {
         fs::read_dir(&entries_dir)?
             .map(|e| e.map(|e| e.path()))
@@ -315,14 +324,14 @@ fn build_efi_boot_image(
         .chain(uki_entries.iter().map(|u| u.path.as_path()))
         .map(|p| fs::metadata(p).map(|m| m.len()))
         .sum::<std::io::Result<u64>>()?;
-    // FAT overhead and slack: 20% plus 8 MB, at least 16 MB.
-    let size_mb = (payload * 12 / 10 / (1024 * 1024) + 8).max(16);
+    // FAT overhead and slack: 20% plus 8 MiB, at least 16 MiB.
+    let size_mib = (payload * 12 / 10 / (1024 * 1024) + 8).max(16);
 
     let image = iso_root.join(EFIBOOT_FILENAME);
-    create_fat16_image(&image, size_mb)?;
+    create_fat16_image(&image, size_mib)?;
     // The ESP holds the same tree as the ISO: mtools paths are `::<path>`.
     let esp = |path: &str| format!("::{path}");
-    let entries_path = format!("{LOADER_ENTRIES_DIR}/entries");
+    let entries_path = format!("{LOADER_ENTRIES_DIR}/{ENTRIES_SUBDIR}");
     for dir in ["EFI", ISO_EFI_DIR, UKI_EFI_DIR, LOADER_ENTRIES_DIR, entries_path.as_str()] {
         mmd(&image, &esp(dir))?;
     }
@@ -343,11 +352,11 @@ fn build_efi_boot_image(
 
 /// The loader entry name for a UKI file (`name.efi` → `name`).
 fn entry_stem(filename: &str) -> &str {
-    filename.trim_end_matches(".efi")
+    filename.strip_suffix(".efi").unwrap_or(filename)
 }
 
 fn write_loader_entries(loader_dir: &Path, entries: &[UkiMenuEntry]) -> Result<()> {
-    let entries_dir = loader_dir.join("entries");
+    let entries_dir = loader_dir.join(ENTRIES_SUBDIR);
     fs::create_dir_all(&entries_dir)
         .with_context(|| format!("creating loader entries dir '{}'", entries_dir.display()))?;
     for entry in entries {

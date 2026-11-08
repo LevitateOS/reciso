@@ -48,15 +48,34 @@ pub fn write_checksum(iso_path: &Path) -> Result<PathBuf> {
         .file_name()
         .context("ISO path has no file name")?
         .to_string_lossy();
-    let checksum_path = iso_path.with_extension(ISO_CHECKSUM_SUFFIX.trim_start_matches('.'));
-    fs::write(&checksum_path, format!("{hash}{SHA512_SEPARATOR}{filename}\n"))?;
+    let checksum_path = checksum_path(iso_path);
+    let partial = checksum_path.with_extension("sha512.partial");
+    fs::write(&partial, format!("{hash}{SHA512_SEPARATOR}{filename}\n"))
+        .with_context(|| format!("writing {}", partial.display()))?;
+    fs::rename(&partial, &checksum_path)
+        .with_context(|| format!("moving the checksum to {}", checksum_path.display()))?;
     Ok(checksum_path)
 }
 
-/// Create an empty FAT16 image of `size_mb`.
-pub fn create_fat16_image(output: &Path, size_mb: u64) -> Result<()> {
+/// Remove a checksum an earlier build left beside the ISO.
+pub fn remove_checksum(iso_path: &Path) -> Result<()> {
+    let path = checksum_path(iso_path);
+    match fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("removing the stale checksum {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn checksum_path(iso_path: &Path) -> PathBuf {
+    iso_path.with_extension(ISO_CHECKSUM_SUFFIX.trim_start_matches('.'))
+}
+
+/// Create an empty FAT16 image of `size_mib` MiB.
+pub fn create_fat16_image(output: &Path, size_mib: u64) -> Result<()> {
     let file = fs::File::create(output)?;
-    file.set_len(size_mb * 1024 * 1024)?;
+    file.set_len(size_mib * 1024 * 1024)?;
     run(
         Command::new("mkfs.fat").args(["-F", "16"]).arg(output),
         "formatting the EFI image",
