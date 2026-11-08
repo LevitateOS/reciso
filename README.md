@@ -11,14 +11,7 @@ Builds ISOs with systemd-boot and UKI support. Outputs a single bootable ISO tha
 ## Usage
 
 ```bash
-# Basic ISO with auto-generated UKI
-reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO -o output.iso
-
-# With prebuilt UKIs
-reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-       --uki myos-live.efi --uki myos-emergency.efi -o output.iso
-
-# Build UKIs inline (format: name:extra_cmdline:filename)
+# Boot entries, one UKI each (format: name:extra_cmdline:filename)
 reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
        --build-uki 'Normal::myos.efi' \
        --build-uki 'Emergency:emergency:myos-emergency.efi' \
@@ -27,7 +20,7 @@ reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
 
 # With live overlay image (EROFS)
 reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-       --overlay-image live-overlay.erofs -o output.iso
+       --build-uki 'Normal::myos.efi' --overlay-image live-overlay.erofs -o output.iso
 ```
 
 ## Options
@@ -41,10 +34,8 @@ Required:
 -r, --rootfs <PATH>      Path to rootfs image (EROFS)
 -l, --label <STRING>     ISO volume label
 -o, --output <PATH>      Output ISO path
-
-UKI options:
---uki <PATH>             Add prebuilt UKI (can repeat)
---build-uki <SPEC>       Build UKI inline: 'name:cmdline:filename'
+--build-uki <SPEC>       A boot entry's UKI, built inline: 'name:cmdline:filename'
+                         (at least one; can repeat)
 
 Branding:
 --os-name <NAME>         OS name for boot menu

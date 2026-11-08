@@ -54,7 +54,7 @@ pub struct IsoConfig {
     pub label: String,
     pub output: PathBuf,
     /// UKI sources (prebuilt files or build specs).
-    pub ukis: Vec<UkiSource>,
+    pub ukis: Vec<UkiSpec>,
     /// Optional live overlay payload image (EROFS).
     pub overlay_image: Option<PathBuf>,
     /// OS release information for UKI branding.
@@ -77,20 +77,15 @@ pub enum LivePayloadLayout {
     AppendedPartitions,
 }
 
-/// Source for a UKI - either prebuilt or to be built.
+/// A UKI to build for the ISO's boot menu.
 #[derive(Debug, Clone)]
-pub enum UkiSource {
-    /// Path to a prebuilt UKI file.
-    Prebuilt(PathBuf),
-    /// Build a UKI with these parameters.
-    Build {
-        /// Display name for boot menu.
-        name: String,
-        /// Extra cmdline parameters (appended to base).
-        extra_cmdline: String,
-        /// Output filename (e.g., "myos-live.efi").
-        filename: String,
-    },
+pub struct UkiSpec {
+    /// Display name for boot menu.
+    pub name: String,
+    /// Extra cmdline parameters (appended to base).
+    pub extra_cmdline: String,
+    /// Output filename (e.g., "myos-live.efi").
+    pub filename: String,
 }
 
 #[derive(Debug, Clone)]
@@ -228,12 +223,8 @@ fn validate_inputs(config: &IsoConfig) -> Result<()> {
             );
         }
     }
-    for uki in &config.ukis {
-        if let UkiSource::Prebuilt(path) = uki {
-            if !path.exists() {
-                bail!("UKI not found: {}", path.display());
-            }
-        }
+    if config.ukis.is_empty() {
+        bail!("the ISO needs at least one UKI to boot");
     }
 
     if !config.systemd_boot.is_file() {
@@ -290,66 +281,22 @@ fn setup_uefi_boot(config: &IsoConfig, iso_root: &Path, progress: &dyn Fn(&str))
     let mut uki_entries: Vec<UkiMenuEntry> = Vec::new();
 
     for uki in &config.ukis {
-        match uki {
-            UkiSource::Prebuilt(path) => {
-                let filename = path.file_name().context("UKI has no filename")?;
-                let dst = uki_dir.join(filename);
-                fs::copy(path, &dst)?;
-                let filename_str = filename.to_string_lossy().to_string();
-                let title = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| filename_str.clone());
-                uki_entries.push(UkiMenuEntry {
-                    title,
-                    filename: filename_str,
-                    path: dst,
-                });
-            }
-            UkiSource::Build {
-                name,
-                extra_cmdline,
-                filename,
-            } => {
-                let cmdline = if extra_cmdline.is_empty() {
-                    base_cmdline.clone()
-                } else {
-                    format!("{} {}", base_cmdline, extra_cmdline)
-                };
+        let cmdline = if uki.extra_cmdline.is_empty() {
+            base_cmdline.clone()
+        } else {
+            format!("{} {}", base_cmdline, uki.extra_cmdline)
+        };
 
-                let output = uki_dir.join(filename);
-                let mut uki_config =
-                    recuki::UkiConfig::new(&config.kernel, &config.initrd, &cmdline, &output);
-                uki_config.os_release = config.os_release.clone();
-
-                progress(&format!("  Building UKI: {}", filename));
-                recuki::build_uki(&uki_config)?;
-                uki_entries.push(UkiMenuEntry {
-                    title: name.clone(),
-                    filename: filename.clone(),
-                    path: output,
-                });
-            }
-        }
-    }
-
-    if uki_entries.is_empty() {
-        let filename = format!("{}.efi", config.label.to_lowercase());
-        let output = uki_dir.join(&filename);
+        let output = uki_dir.join(&uki.filename);
         let mut uki_config =
-            recuki::UkiConfig::new(&config.kernel, &config.initrd, &base_cmdline, &output);
+            recuki::UkiConfig::new(&config.kernel, &config.initrd, &cmdline, &output);
         uki_config.os_release = config.os_release.clone();
 
-        progress(&format!("  Building UKI: {}", filename));
+        progress(&format!("  Building UKI: {}", uki.filename));
         recuki::build_uki(&uki_config)?;
-        let title = config
-            .os_release
-            .as_ref()
-            .map(|os| format!("{} {}", os.name, os.version))
-            .unwrap_or_else(|| config.label.clone());
         uki_entries.push(UkiMenuEntry {
-            title,
-            filename,
+            title: uki.name.clone(),
+            filename: uki.filename.clone(),
             path: output,
         });
     }

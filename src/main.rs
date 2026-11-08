@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-use reciso::{create_iso, IsoConfig, LivePayloadLayout, UkiSource};
+use reciso::{create_iso, IsoConfig, LivePayloadLayout, UkiSpec};
 use recuki::OsReleaseArgs;
 
 #[derive(Parser, Debug)]
@@ -16,14 +16,7 @@ use recuki::OsReleaseArgs;
     version,
     after_help = "\
 EXAMPLES:
-    # Basic ISO with auto-generated UKI
-    reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO -o output.iso
-
-    # With prebuilt UKIs
-    reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-           --uki myos-live.efi --uki myos-emergency.efi -o output.iso
-
-    # Build UKIs inline (format: name:extra_cmdline:filename)
+    # Boot entries, one UKI each (format: name:extra_cmdline:filename)
     reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
            --build-uki 'Normal::myos.efi' \
            --build-uki 'Emergency:emergency:myos-emergency.efi' \
@@ -32,13 +25,13 @@ EXAMPLES:
 
     # With live overlay image (EROFS)
     reciso -k vmlinuz -i initramfs.img -r rootfs.erofs -l MYISO \
-           --overlay-image live-overlay.erofs -o output.iso
+           --build-uki 'Normal::myos.efi' --overlay-image live-overlay.erofs -o output.iso
 
 REQUIREMENTS:
     - systemd-boot (dnf install systemd-boot)
     - xorriso (dnf install xorriso)
     - mtools (dnf install mtools)
-    - ukify (dnf install systemd-ukify) - if building UKIs
+    - ukify (dnf install systemd-ukify)
 "
 )]
 struct Args {
@@ -62,13 +55,10 @@ struct Args {
     #[arg(short = 'o', long = "output")]
     output: PathBuf,
 
-    /// Prebuilt UKI files to include (can be specified multiple times)
-    #[arg(long = "uki")]
-    ukis: Vec<PathBuf>,
-
-    /// Build UKIs inline. Format: "name:extra_cmdline:filename"
+    /// A boot entry's UKI, built inline (at least one). Format:
+    /// "name:extra_cmdline:filename"
     /// Example: "Emergency:emergency:myos-emergency.efi"
-    #[arg(long = "build-uki")]
+    #[arg(long = "build-uki", required = true)]
     build_ukis: Vec<String>,
 
     /// Add an extra file to the ISO. Format: "src:dst"
@@ -116,10 +106,6 @@ fn main() -> Result<()> {
         &args.output,
     );
 
-    for uki in &args.ukis {
-        config.ukis.push(UkiSource::Prebuilt(uki.clone()));
-    }
-
     for spec in &args.build_ukis {
         // name:cmdline:filename — the name ends at the first ':' and the file
         // name starts after the last, so the command line may contain ':'.
@@ -134,7 +120,7 @@ fn main() -> Result<()> {
                 spec
             );
         };
-        config.ukis.push(UkiSource::Build {
+        config.ukis.push(UkiSpec {
             name: name.to_string(),
             extra_cmdline: cmdline.to_string(),
             filename: filename.to_string(),
